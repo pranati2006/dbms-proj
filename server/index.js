@@ -19,45 +19,91 @@ db.connect(err => {
     console.log("Connected to HospitalDB_24BDS1097");
 });
 
-// Helper function to generate CRUD routes for a table
-const generateCRUD = (tableName, idColumn) => {
-    // 1. CREATE (Insert)
-    app.post(`/api/${tableName}`, (req, res) => {
-        const q = `INSERT INTO ${tableName} SET ?`;
-        db.query(q, req.body, (err, result) => {
-            if (err) return res.status(500).json(err);
-            res.status(201).json({ message: "Record added", id: result.insertId });
-        });
-    });
+/**
+ * CLEANING FUNCTION
+ * Ensures that any key ending in _ID, or named Age/Capacity, 
+ * is converted to a proper Integer before MySQL sees it.
+ */
+const sanitizeData = (data) => {
+    const cleanData = {};
+    for (let key in data) {
+        // 1. Identify Numeric Fields
+        const isNumeric = key.endsWith('_ID') || key === 'Age' || key === 'Capacity';
 
-    // 2. READ (Retrieve All)
-    app.get(`/api/${tableName}`, (req, res) => {
-        const q = `SELECT * FROM ${tableName}`;
-        db.query(q, (err, data) => {
-            if (err) return res.status(500).json(err);
-            res.status(200).json(data);
-        });
-    });
+        // 2. Handle Empty Values: If it's empty, don't even send it to MySQL
+        if (data[key] === '' || data[key] === null || data[key] === undefined) {
+            continue;
+        }
 
-    // 3. UPDATE
-    app.put(`/api/${tableName}/:id`, (req, res) => {
-        const id = req.params.id;
-        const q = `UPDATE ${tableName} SET ? WHERE ${idColumn} = ?`;
-        db.query(q, [req.body, id], (err, result) => {
-            if (err) return res.status(500).json(err);
-            res.status(200).json({ message: "Record updated" });
-        });
-    });
+        // 3. Force Conversion for Numbers
+        if (isNumeric) {
+            cleanData[key] = parseInt(data[key], 10);
+        } else {
+            cleanData[key] = data[key];
+        }
+    }
+    return cleanData;
+};
 
-    // 4. DELETE
-    app.delete(`/api/${tableName}/:id`, (req, res) => {
-        const id = req.params.id;
-        const q = `DELETE FROM ${tableName} WHERE ${idColumn} = ?`;
-        db.query(q, [id], (err, result) => {
-            if (err) return res.status(500).json(err);
-            res.status(200).json({ message: "Record deleted" });
-        });
+// Update your POST route inside generateCRUD to use this:
+app.post(`/api/${tableName}`, (req, res) => {
+    const cleanedBody = sanitizeData(req.body);
+
+    // DEBUG: This will show up in your terminal. Check if Patient_ID is there!
+    console.log(`INSERTING INTO ${tableName}:`, cleanedBody);
+
+    const q = `INSERT INTO ${tableName} SET ?`;
+    db.query(q, cleanedBody, (err, result) => {
+        if (err) {
+            console.error("MYSQL ERROR:", err.sqlMessage);
+            // This returns the EXACT reason (e.g., 'Patient_ID' cannot be null)
+            return res.status(400).json({ message: err.sqlMessage });
+        }
+        res.status(201).json({ message: "Record added" });
     });
+});
+// 2. READ (Retrieve All)
+app.get(`/api/${tableName}`, (req, res) => {
+    const q = `SELECT * FROM ${tableName}`;
+    db.query(q, (err, data) => {
+        if (err) return res.status(500).json({ message: err.sqlMessage });
+        res.status(200).json(data);
+    });
+});
+
+// 3. UPDATE
+app.put(`/api/${tableName}/:id`, (req, res) => {
+    const id = req.params.id;
+    const cleanedBody = sanitizeData(req.body);
+    const q = `UPDATE ${tableName} SET ? WHERE ${idColumn} = ?`;
+
+    db.query(q, [cleanedBody, id], (err, result) => {
+        if (err) {
+            console.error(`Error updating ${tableName}:`, err.sqlMessage);
+            return res.status(400).json({ message: err.sqlMessage });
+        }
+        res.status(200).json({ message: "Record updated" });
+    });
+});
+
+// 4. DELETE
+app.delete(`/api/${tableName}/:id`, (req, res) => {
+    const id = req.params.id;
+    const q = `DELETE FROM ${tableName} WHERE ${idColumn} = ?`;
+    db.query(q, [id], (err, result) => {
+        if (err) {
+            console.error(`Error deleting from ${tableName}:`, err.sqlMessage);
+            // Handle Foreign Key constraint errors specifically
+            if (err.errno === 1451) {
+                return res.status(400).json({
+                    message: "Cannot delete this record because it is referenced in another table."
+                });
+            }
+            return res.status(500).json({ message: err.sqlMessage });
+        }
+        res.status(200).json({ message: "Record deleted" });
+    });
+});
 };
 
 // Generate Routes for all 8 Modules
@@ -70,15 +116,15 @@ generateCRUD('DIAGNOSIS_24BDS1097', 'Diagnosis_ID');
 generateCRUD('TREATMENT_24BDS1097', 'Treatment_ID');
 generateCRUD('MEDICATION_24BDS1097', 'Medication_ID');
 
-// Special Route: Joined Admission Data (For a better Frontend View)
+// Special Route: Joined Admission Data
 app.get('/api/admissions-detailed', (req, res) => {
     const q = `
         SELECT a.*, p.Name as Patient_Name, w.Ward_Name 
         FROM ADMISSION_24BDS1097 a
-        JOIN PATIENT_24BDS1097 p ON a.Patient_ID = p.Patient_ID
-        JOIN WARD_24BDS1097 w ON a.Ward_ID = w.Ward_ID`;
+        LEFT JOIN PATIENT_24BDS1097 p ON a.Patient_ID = p.Patient_ID
+        LEFT JOIN WARD_24BDS1097 w ON a.Ward_ID = w.Ward_ID`;
     db.query(q, (err, data) => {
-        if (err) return res.status(500).json(err);
+        if (err) return res.status(500).json({ message: err.sqlMessage });
         res.status(200).json(data);
     });
 });
